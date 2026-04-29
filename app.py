@@ -7,10 +7,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
-DB = os.environ.get("DB_PATH", "tracker.db")
+DB               = os.environ.get("DB_PATH", "tracker.db")
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-CHECK_INTERVAL   = int(os.environ.get("CHECK_INTERVAL", "60"))
+SCRAPE_DO_TOKEN  = os.environ.get("SCRAPE_DO_TOKEN", "")
+CHECK_HOUR       = int(os.environ.get("CHECK_HOUR", "9"))
 
 # ── DB ─────────────────────────────────────────────────────────────────────────
 
@@ -49,15 +50,11 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-SCRAPE_DO_TOKEN = os.environ.get("SCRAPE_DO_TOKEN", "")
-
 def fetch_url(url):
-    """Fetch via scrape.do proxy if token set, else direct."""
     if SCRAPE_DO_TOKEN:
-        proxy_url = f"https://api.scrape.do?token={SCRAPE_DO_TOKEN}&url={requests.utils.quote(url)}&geoCode=cz"
-        return requests.get(proxy_url, timeout=30)
-    else:
-        return requests.get(url, headers=HEADERS, timeout=20)
+        proxy = f"https://api.scrape.do?token={SCRAPE_DO_TOKEN}&url={requests.utils.quote(url)}&geoCode=cz"
+        return requests.get(proxy, timeout=30)
+    return requests.get(url, headers=HEADERS, timeout=20)
 
 def scrape(url):
     try:
@@ -110,12 +107,40 @@ def scrape(url):
 # ── Telegram ───────────────────────────────────────────────────────────────────
 
 def tg(text):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return False
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
+        return r.status_code == 200
     except Exception as e:
-        log.error(f"Telegram: {e}")
+        log.error(f"Telegram: {e}"); return False
+
+def tg_summary(pid):
+    c = get_db()
+    p    = c.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+    if not p: c.close(); return
+    lat  = c.execute("SELECT * FROM history WHERE product_id=? ORDER BY id DESC LIMIT 1",(pid,)).fetchone()
+    minp = c.execute("SELECT MIN(price) as m FROM history WHERE product_id=? AND price IS NOT NULL",(pid,)).fetchone()
+    chks = c.execute("SELECT COUNT(*) as n FROM history WHERE product_id=?",(pid,)).fetchone()
+    c.close()
+    name  = p["name"] or "Produkt"
+    price = lat["price"] if lat and lat["price"] else None
+    lines = [f"📦 <b>{name}</b>"]
+    if price:
+        lines.append(f"\n💰 Aktuální cena: <b>{price:,.0f} Kč</b>".replace(",", "\u00a0"))
+    if minp and minp["m"]:
+        lines.append(f"📉 Historické minimum: <b>{minp['m']:,.0f} Kč</b>".replace(",", "\u00a0"))
+    if p["target"]:
+        lines.append(f"🎯 Cílová cena: <b>{p['target']:,.0f} Kč</b>".replace(",", "\u00a0"))
+        if price:
+            diff = price - p["target"]
+            if diff <= 0: lines.append("✅ Cílová cena <b>dosažena!</b>")
+            else: lines.append(f"⏳ Chybí: <b>{diff:,.0f} Kč</b>".replace(",", "\u00a0"))
+    if lat and lat["alza_days"]: lines.append("🔥 <b>AlzaDny jsou aktivní!</b>")
+    if lat and lat["coupon"]:    lines.append(f"🎫 Kupon: <code>{lat['coupon']}</code>")
+    lines.append(f"\n🔍 Kontrol provedeno: {chks['n']}")
+    lines.append(f"🔗 <a href='{p['url']}'>Otevřít na Alze</a>")
+    tg("\n".join(lines))
 
 # ── Check ──────────────────────────────────────────────────────────────────────
 
@@ -137,100 +162,148 @@ def check_product(pid):
     if price is None: return
     if prev and prev["price"] and price < prev["price"]:
         diff = prev["price"] - price
-        tg(f"📉 <b>Pokles ceny!</b>\n{name}\n\n<b>{price:,.0f} Kč</b>  (↓ {diff:,.0f} Kč)\n{p['url']}")
+        tg(f"📉 <b>Pokles ceny!</b>\n{name}\n\n<b>{price:,.0f} Kč</b>  (↓ {diff:,.0f} Kč)\n{p['url']}".replace(",","\u00a0"))
     if p["target"] and price <= p["target"]:
-        tg(f"🎯 <b>Cílová cena!</b>\n{name}\n\n<b>{price:,.0f} Kč</b> ≤ {p['target']:,.0f} Kč\n{p['url']}")
+        tg(f"🎯 <b>Cílová cena dosažena!</b>\n{name}\n\n<b>{price:,.0f} Kč</b> ≤ {p['target']:,.0f} Kč\n{p['url']}".replace(",","\u00a0"))
     if result["alza_days"]:
-        tg(f"🔥 <b>AlzaDny!</b>\n{name}\n\n{price:,.0f} Kč\n{p['url']}")
+        tg(f"🔥 <b>AlzaDny jsou aktivní!</b>\n{name}\n\n{price:,.0f} Kč\n{p['url']}".replace(",","\u00a0"))
     if result["coupon"]:
-        tg(f"🎫 <b>Kupon:</b> <code>{result['coupon']}</code>\n{name}\n{price:,.0f} Kč\n{p['url']}")
+        tg(f"🎫 <b>Kupon:</b> <code>{result['coupon']}</code>\n{name}\n{price:,.0f} Kč\n{p['url']}".replace(",","\u00a0"))
     log.info(f"[{name}] {price} Kč alza_days={result['alza_days']}")
 
 def check_all():
     c = get_db()
     ids = [r["id"] for r in c.execute("SELECT id FROM products WHERE active=1").fetchall()]
     c.close()
-    log.info(f"Checking {len(ids)} products")
+    log.info(f"Daily check — {len(ids)} products")
     for pid in ids:
         check_product(pid)
         time.sleep(4)
 
-# ── HTML helpers ───────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def fmt(n):
     if n is None: return "—"
-    return f"{n:,.0f}".replace(",", " ") + " Kč"
+    return f"{n:,.0f}".replace(",", "\u00a0") + "\u00a0Kč"
 
 CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{--bg:#f5f5f3;--s:#fff;--b:#e4e4e0;--t:#181816;--m:#686863;
-  --red:#e52213;--redd:#b91c0f;--g:#166534;--gbg:#f0fdf4;
-  --abg:#fffbeb;--ac:#92400e;--bbg:#eff6ff;--bc:#1d4ed8;--r:10px;--rs:6px}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-  background:var(--bg);color:var(--t);font-size:14px;line-height:1.5}
+:root{
+  --bg:#f2f2f7;--surface:#fff;--surface2:#f9f9fb;
+  --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.05);
+  --text:#1c1c1e;--text2:#3a3a3c;--muted:#8e8e93;
+  --accent:#007aff;--accent-hover:#0062cc;
+  --red:#ff3b30;--green:#34c759;
+  --green-text:#1a7f3c;--green-bg:#f0fdf4;
+  --amber:#ff9500;--amber-bg:#fff8f0;--amber-text:#7d4400;
+  --blue-bg:#f0f6ff;
+  --r:14px;--rs:10px;--rxs:8px;
+  --shadow:0 1px 3px rgba(0,0,0,0.06),0 4px 16px rgba(0,0,0,0.04);
+  --shadow-sm:0 1px 2px rgba(0,0,0,0.05);
+}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;
+  background:var(--bg);color:var(--text);font-size:15px;line-height:1.5;
+  -webkit-font-smoothing:antialiased}
 a{color:inherit;text-decoration:none}
-.bar{background:var(--s);border-bottom:1px solid var(--b);height:54px;
+.nav{background:rgba(255,255,255,.85);
+  backdrop-filter:saturate(180%) blur(20px);
+  -webkit-backdrop-filter:saturate(180%) blur(20px);
+  border-bottom:1px solid var(--border);height:52px;
   display:flex;align-items:center;justify-content:space-between;
-  padding:0 24px;position:sticky;top:0;z-index:50}
-.logo{font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px}
-.dot{width:8px;height:8px;background:var(--red);border-radius:50%}
-.ibadge{font-size:12px;color:var(--m);background:var(--bg);border:1px solid var(--b);
-  border-radius:20px;padding:3px 10px}
-.wrap{max-width:900px;margin:0 auto;padding:24px 16px}
-.alert{display:flex;align-items:center;gap:8px;padding:11px 15px;
-  border-radius:var(--rs);margin-bottom:18px;font-size:13px}
-.aw{background:var(--abg);border:1px solid #fcd34d;color:var(--ac)}
-.ag{background:var(--gbg);border:1px solid #86efac;color:var(--g)}
-.addcard{background:var(--s);border:1px solid var(--b);border-radius:var(--r);
-  padding:20px;margin-bottom:22px}
-.addtitle{font-size:11px;font-weight:600;color:var(--m);text-transform:uppercase;
-  letter-spacing:.05em;margin-bottom:14px}
-.row{display:flex;gap:10px;flex-wrap:wrap}
-.fg{display:flex;flex-direction:column;gap:4px;flex:1;min-width:190px}
-.fgl{flex:3;min-width:270px}
-.fg label{font-size:11px;color:var(--m);font-weight:500;text-transform:uppercase;letter-spacing:.04em}
-.fg input{padding:8px 11px;border:1px solid var(--b);border-radius:var(--rs);
-  font-size:13px;background:var(--bg);color:var(--t);outline:none}
-.fg input:focus{border-color:var(--red);background:var(--s)}
-.fgb{display:flex;align-items:flex-end}
-.btn{display:inline-flex;align-items:center;gap:5px;padding:8px 15px;
-  border-radius:var(--rs);border:1px solid var(--b);background:var(--s);
-  color:var(--t);font-size:13px;cursor:pointer;white-space:nowrap}
-.btn:hover{background:var(--bg)}
-.btnr{background:var(--red);color:#fff;border-color:var(--red)}
-.btnr:hover{background:var(--redd)}
-.btns{padding:5px 11px;font-size:12px}
-.btng{border-color:transparent;background:transparent}
-.btng:hover{background:var(--bg)}
-.sh{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
-.st{font-size:11px;font-weight:600;color:var(--m);text-transform:uppercase;letter-spacing:.05em}
-.card{background:var(--s);border:1px solid var(--b);border-radius:var(--r);
-  margin-bottom:10px;overflow:hidden}
-.card.off{opacity:.5}
-.cb{display:flex;align-items:center;gap:12px;padding:14px 18px;flex-wrap:wrap}
-.ci{flex:1;min-width:0}
-.cn{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cu{font-size:11px;color:var(--m);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
-.cu a{color:var(--bc)}
-.cbadges{display:flex;flex-wrap:wrap;gap:5px;min-width:160px}
-.badge{display:inline-flex;align-items:center;font-size:11px;font-weight:500;padding:3px 8px;border-radius:20px}
-.bf{background:var(--abg);color:var(--ac)}
-.bt{background:var(--gbg);color:var(--g)}
-.bco{background:var(--bbg);color:var(--bc)}
-.bp{background:var(--bg);color:var(--m)}
-.cp{text-align:right;min-width:110px}
-.pv{font-size:20px;font-weight:700;line-height:1.2}
-.pc{font-size:11px;margin-top:2px}
-.dn{color:var(--g)}.up{color:var(--red)}.neu{color:var(--m)}
-.ca{display:flex;gap:5px;align-items:center}
-.cf{background:var(--bg);border-top:1px solid var(--b);padding:8px 18px;
-  display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--m)}
-.cfl{display:flex;gap:14px}
-.empty{text-align:center;padding:60px 20px;color:var(--m)}
-.empty h3{font-size:16px;font-weight:600;color:var(--t);margin-bottom:4px}
+  padding:0 24px;position:sticky;top:0;z-index:100}
+.nav-logo{font-size:17px;font-weight:600;letter-spacing:-.3px}
+.nav-logo span{color:var(--accent)}
+.nav-right{display:flex;gap:8px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  padding:8px 16px;border-radius:var(--rxs);border:none;
+  font-family:inherit;font-size:14px;font-weight:500;cursor:pointer;
+  transition:all .15s;white-space:nowrap}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:var(--accent-hover)}
+.btn-secondary{background:var(--surface);color:var(--text);
+  border:1px solid var(--border);box-shadow:var(--shadow-sm)}
+.btn-secondary:hover{background:var(--surface2)}
+.btn-ghost{background:transparent;color:var(--muted);padding:6px 10px}
+.btn-ghost:hover{background:var(--border2);color:var(--text)}
+.btn-danger{background:transparent;color:var(--red);padding:6px 10px}
+.btn-danger:hover{background:rgba(255,59,48,.08)}
+.btn-sm{padding:6px 12px;font-size:13px}
+.btn-tg{background:#229ED9;color:#fff}
+.btn-tg:hover{background:#1a8ab8}
+.main{max-width:860px;margin:0 auto;padding:28px 20px}
+.banner{display:flex;align-items:center;gap:10px;padding:12px 16px;
+  border-radius:var(--rs);margin-bottom:20px;font-size:13px;font-weight:500}
+.bwarn{background:var(--amber-bg);color:var(--amber-text);border:1px solid rgba(255,149,0,.2)}
+.bok{background:var(--green-bg);color:var(--green-text);border:1px solid rgba(52,199,89,.2)}
+.add-card{background:var(--surface);border-radius:var(--r);
+  box-shadow:var(--shadow);padding:22px 24px;margin-bottom:28px}
+.add-label{font-size:11px;font-weight:600;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.06em;margin-bottom:14px}
+.form-row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+.fg{display:flex;flex-direction:column;gap:6px;flex:1;min-width:180px}
+.fgl{flex:3;min-width:260px}
+.fg label{font-size:12px;font-weight:500;color:var(--text2)}
+.fg input{padding:10px 13px;border:1.5px solid var(--border);border-radius:var(--rxs);
+  font-family:inherit;font-size:14px;background:var(--surface2);color:var(--text);
+  outline:none;transition:border .15s,background .15s}
+.fg input:focus{border-color:var(--accent);background:var(--surface)}
+.fg input::placeholder{color:var(--muted)}
+.sec{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.sec-title{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.card{background:var(--surface);border-radius:var(--r);
+  box-shadow:var(--shadow);margin-bottom:12px;overflow:hidden;
+  transition:box-shadow .2s}
+.card:hover{box-shadow:0 2px 8px rgba(0,0,0,.08),0 8px 24px rgba(0,0,0,.06)}
+.card.paused{opacity:.5}
+.card-body{display:flex;align-items:center;gap:14px;padding:16px 20px;flex-wrap:wrap}
+.card-info{flex:1;min-width:0}
+.card-name{font-size:15px;font-weight:600;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;letter-spacing:-.2px}
+.card-url{font-size:12px;color:var(--muted);margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-url a{color:var(--accent)}
+.badges{display:flex;gap:6px;flex-wrap:wrap;min-width:130px}
+.badge{display:inline-flex;align-items:center;gap:3px;
+  font-size:11px;font-weight:600;padding:4px 9px;border-radius:20px}
+.bf{background:var(--amber-bg);color:var(--amber-text)}
+.bt{background:var(--green-bg);color:var(--green-text)}
+.bco{background:var(--blue-bg);color:#1a5fa8}
+.bp{background:var(--bg);color:var(--muted)}
+.card-price{text-align:right;min-width:120px}
+.price-main{font-size:22px;font-weight:700;letter-spacing:-.5px;line-height:1.2}
+.price-delta{font-size:12px;font-weight:500;margin-top:3px}
+.dd{color:var(--green-text)}.du{color:var(--red)}.dn2{color:var(--muted)}
+.card-actions{display:flex;gap:4px}
+.card-foot{background:var(--surface2);border-top:1px solid var(--border2);
+  padding:10px 20px;display:flex;justify-content:space-between;
+  font-size:12px;color:var(--muted)}
+.foot-l{display:flex;gap:16px}
+.empty{text-align:center;padding:64px 20px;color:var(--muted)}
+.empty-icon{font-size:44px;margin-bottom:14px}
+.empty h3{font-size:17px;font-weight:600;color:var(--text);margin-bottom:6px}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:10px;margin-bottom:22px}
+.sc{background:var(--surface);border-radius:var(--rs);box-shadow:var(--shadow);padding:14px 16px}
+.sl{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
+.sv{font-size:20px;font-weight:700;letter-spacing:-.3px}
+.svg{color:var(--green-text)}.svr{color:var(--red)}
+.chart-card{background:var(--surface);border-radius:var(--r);box-shadow:var(--shadow);padding:22px;margin-bottom:22px}
+.chart-card h2{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:18px}
+.chart-wrap{height:260px;position:relative}
+.table-card{background:var(--surface);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}
+.table-card h2{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;padding:16px 20px;border-bottom:1px solid var(--border)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:10px 18px;font-size:11px;font-weight:600;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.05em;background:var(--surface2);border-bottom:1px solid var(--border)}
+td{padding:11px 18px;border-bottom:1px solid var(--border2)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--surface2)}
+.tdn{color:var(--green-text);font-weight:600}
+.tup{color:var(--red);font-weight:600}
+.tneu{color:var(--muted)}
 """
 
-# ── Routes ─────────────────────────────────────────────────────────────────────
+# ── Index ──────────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
@@ -238,107 +311,103 @@ def index():
     products = c.execute("SELECT * FROM products ORDER BY added_at DESC").fetchall()
     rows = []
     for p in products:
-        lat   = c.execute("SELECT * FROM history WHERE product_id=? ORDER BY id DESC LIMIT 1",(p["id"],)).fetchone()
-        prev  = c.execute("SELECT price FROM history WHERE product_id=? ORDER BY id DESC LIMIT 1 OFFSET 1",(p["id"],)).fetchone()
-        low   = c.execute("SELECT MIN(price) as m FROM history WHERE product_id=? AND price IS NOT NULL",(p["id"],)).fetchone()
-        chks  = c.execute("SELECT COUNT(*) as n FROM history WHERE product_id=?",(p["id"],)).fetchone()
-        chg   = None
+        lat  = c.execute("SELECT * FROM history WHERE product_id=? ORDER BY id DESC LIMIT 1",(p["id"],)).fetchone()
+        prev = c.execute("SELECT price FROM history WHERE product_id=? ORDER BY id DESC LIMIT 1 OFFSET 1",(p["id"],)).fetchone()
+        low  = c.execute("SELECT MIN(price) as m FROM history WHERE product_id=? AND price IS NOT NULL",(p["id"],)).fetchone()
+        chks = c.execute("SELECT COUNT(*) as n FROM history WHERE product_id=?",(p["id"],)).fetchone()
+        chg  = None
         if lat and lat["price"] and prev and prev["price"]:
             chg = lat["price"] - prev["price"]
         rows.append(dict(p=dict(p), lat=dict(lat) if lat else None,
                          low=low["m"], chg=chg, chks=chks["n"]))
     c.close()
     tg_ok = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
+    banner = (
+        '<div class="banner bok">✓ Telegram aktivní · automatická kontrola každý den v 9:00 UTC</div>'
+        if tg_ok else
+        '<div class="banner bwarn">⚠ Telegram není nastaven — přidej TELEGRAM_TOKEN a TELEGRAM_CHAT_ID v Render dashboardu.</div>'
+    )
 
     cards_html = ""
     if not rows:
-        cards_html = """<div class="empty">
-          <div style="font-size:40px;margin-bottom:12px">📦</div>
-          <h3>Žádné produkty</h3>
-          <p>Vlož URL produktu z Alzy a začni sledovat ceny.</p>
-        </div>"""
+        cards_html = '<div class="empty"><div class="empty-icon">📦</div><h3>Žádné produkty</h3><p>Přidej první produkt výše.</p></div>'
+
     for item in rows:
         p   = item["p"]
         lat = item["lat"]
-        # price block
         if lat and lat.get("price"):
-            pval = f'<div class="pv">{fmt(lat["price"])}</div>'
+            ph = f'<div class="price-main">{fmt(lat["price"])}</div>'
             if item["chg"] is not None:
-                if item["chg"] < 0:
-                    pchg = f'<div class="pc dn">▼ {fmt(abs(item["chg"]))}</div>'
-                elif item["chg"] > 0:
-                    pchg = f'<div class="pc up">▲ {fmt(item["chg"])}</div>'
-                else:
-                    pchg = '<div class="pc neu">— beze změny</div>'
-            else:
-                pchg = '<div class="pc neu">— první záznam</div>'
+                if item["chg"] < 0:   ph += f'<div class="price-delta dd">↓ {fmt(abs(item["chg"]))}</div>'
+                elif item["chg"] > 0: ph += f'<div class="price-delta du">↑ {fmt(item["chg"])}</div>'
+                else:                 ph += '<div class="price-delta dn2">beze změny</div>'
+            else:                     ph += '<div class="price-delta dn2">první záznam</div>'
         else:
-            pval = '<div style="font-size:13px;color:var(--m)">Čekám…</div>'
-            pchg = ""
-        # badges
+            ph = '<div style="font-size:14px;color:var(--muted);font-weight:500">Načítám…</div>'
+
         badges = ""
-        if not p["active"]:         badges += '<span class="badge bp">⏸ Pozastaveno</span>'
+        if not p["active"]:              badges += '<span class="badge bp">Pozastaveno</span>'
         if lat and lat.get("alza_days"): badges += '<span class="badge bf">🔥 AlzaDny</span>'
-        if lat and lat.get("coupon"):    badges += f'<span class="badge bco">🎫 {lat["coupon"][:20]}</span>'
-        if p["target"]:             badges += f'<span class="badge bt">Cíl: {fmt(p["target"])}</span>'
-        # footer
-        foot_l = ""
-        if item["low"]: foot_l += f'<span>Min: <b>{fmt(item["low"])}</b></span>'
-        foot_l += f'<span>{item["chks"]} kontrol</span>'
-        foot_r = lat["checked_at"] if lat else "zatím nekontrolováno"
-        pause_icon = "▶" if not p["active"] else "⏸"
-        name_disp = p["name"] or "⏳ Načítám…"
-        url_short = p["url"][:70] + ("…" if len(p["url"])>70 else "")
+        if lat and lat.get("coupon"):    badges += f'<span class="badge bco">🎫 {lat["coupon"][:18]}</span>'
+        if p["target"]:                  badges += f'<span class="badge bt">Cíl {fmt(p["target"])}</span>'
+
+        fl = ""
+        if item["low"]: fl += f'<span>Min&nbsp;<b>{fmt(item["low"])}</b></span>'
+        fl += f'<span>{item["chks"]}&nbsp;kontrol</span>'
+        fr = lat["checked_at"] if lat else "zatím nekontrolováno"
+        nd = p["name"] or "Načítám…"
+        us = p["url"][:65] + ("…" if len(p["url"])>65 else "")
+
         cards_html += f"""
-        <div class="card {'off' if not p['active'] else ''}">
-          <div class="cb">
-            <div class="ci">
-              <div class="cn">{name_disp}</div>
-              <div class="cu"><a href="{p['url']}" target="_blank">{url_short}</a></div>
+        <div class="card {'paused' if not p['active'] else ''}">
+          <div class="card-body">
+            <div class="card-info">
+              <div class="card-name">{nd}</div>
+              <div class="card-url"><a href="{p['url']}" target="_blank">{us}</a></div>
             </div>
-            <div class="cbadges">{badges}</div>
-            <div class="cp">{pval}{pchg}</div>
-            <div class="ca">
-              <a href="/product/{p['id']}" class="btn btns">📈 Historie</a>
-              <form method="post" action="/check/{p['id']}"><button class="btn btns btng" title="Zkontrolovat teď">↻</button></form>
-              <form method="post" action="/toggle/{p['id']}"><button class="btn btns btng">{pause_icon}</button></form>
-              <form method="post" action="/delete/{p['id']}" onsubmit="return confirm('Smazat produkt a historii?')">
-                <button class="btn btns btng" style="color:var(--red)">✕</button>
+            <div class="badges">{badges}</div>
+            <div class="card-price">{ph}</div>
+            <div class="card-actions">
+              <a href="/product/{p['id']}" class="btn btn-secondary btn-sm">📈 Historie</a>
+              <form method="post" action="/notify/{p['id']}">
+                <button class="btn btn-tg btn-sm" title="Poslat souhrn do Telegramu">✈ TG</button>
+              </form>
+              <form method="post" action="/check/{p['id']}">
+                <button class="btn btn-ghost btn-sm" title="Zkontrolovat cenu teď">↻</button>
+              </form>
+              <form method="post" action="/toggle/{p['id']}">
+                <button class="btn btn-ghost btn-sm">{'⏸' if p['active'] else '▶'}</button>
+              </form>
+              <form method="post" action="/delete/{p['id']}" onsubmit="return confirm('Smazat?')">
+                <button class="btn btn-danger btn-sm">✕</button>
               </form>
             </div>
           </div>
-          <div class="cf">
-            <div class="cfl">{foot_l}</div>
-            <span>{foot_r}</span>
+          <div class="card-foot">
+            <div class="foot-l">{fl}</div>
+            <span>{fr}</span>
           </div>
         </div>"""
-
-    tg_alert = (
-        '<div class="alert ag">✓ Telegram notifikace jsou aktivní</div>' if tg_ok
-        else '<div class="alert aw">⚠ Telegram není nastaven — přidej TELEGRAM_TOKEN a TELEGRAM_CHAT_ID v Render dashboardu.</div>'
-    )
 
     return f"""<!DOCTYPE html>
 <html lang="cs"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Alza Tracker</title>
-<style>{CSS}</style>
+<title>AlzaTracker</title><style>{CSS}</style>
 </head><body>
-<div class="bar">
-  <div class="logo"><div class="dot"></div>Alza Tracker</div>
-  <div style="display:flex;align-items:center;gap:8px">
-    <span class="ibadge">kontrola každých {CHECK_INTERVAL} min</span>
+<nav class="nav">
+  <div class="nav-logo">Alza<span>Tracker</span></div>
+  <div class="nav-right">
     <form method="post" action="/check_all">
-      <button class="btn btns">↻ Zkontrolovat vše</button>
+      <button class="btn btn-secondary btn-sm">↻ Zkontrolovat vše</button>
     </form>
   </div>
-</div>
-<div class="wrap">
-  {tg_alert}
-  <div class="addcard">
-    <div class="addtitle">Přidat produkt</div>
+</nav>
+<div class="main">
+  {banner}
+  <div class="add-card">
+    <div class="add-label">Přidat produkt</div>
     <form method="post" action="/add">
-      <div class="row">
+      <div class="form-row">
         <div class="fg fgl">
           <label>URL produktu na Alze</label>
           <input type="url" name="url" placeholder="https://www.alza.cz/nazev-produktu.htm" required>
@@ -347,18 +416,18 @@ def index():
           <label>Cílová cena (Kč) — nepovinné</label>
           <input type="number" name="target" placeholder="např. 15000" min="0" step="1">
         </div>
-        <div class="fgb"><button class="btn btnr" type="submit">+ Přidat</button></div>
+        <button class="btn btn-primary" type="submit">Přidat</button>
       </div>
     </form>
   </div>
-  <div class="sh">
-    <span class="st">Sledované produkty</span>
-    <span style="font-size:12px;color:var(--m)">{len(rows)} celkem</span>
+  <div class="sec">
+    <span class="sec-title">Sledované produkty</span>
+    <span style="font-size:13px;color:var(--muted)">{len(rows)} celkem</span>
   </div>
   {cards_html}
-</div>
-</body></html>"""
+</div></body></html>"""
 
+# ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.route("/add", methods=["POST"])
 def add():
@@ -377,7 +446,6 @@ def add():
         c.close()
     return redirect(url_for("index"))
 
-
 @app.route("/delete/<int:pid>", methods=["POST"])
 def delete(pid):
     c = get_db()
@@ -386,7 +454,6 @@ def delete(pid):
     c.commit(); c.close()
     return redirect(url_for("index"))
 
-
 @app.route("/toggle/<int:pid>", methods=["POST"])
 def toggle(pid):
     c = get_db()
@@ -394,18 +461,20 @@ def toggle(pid):
     c.commit(); c.close()
     return redirect(url_for("index"))
 
-
 @app.route("/check/<int:pid>", methods=["POST"])
 def check_now(pid):
     threading.Thread(target=check_product, args=(pid,), daemon=True).start()
     return redirect(url_for("index"))
-
 
 @app.route("/check_all", methods=["POST"])
 def check_all_route():
     threading.Thread(target=check_all, daemon=True).start()
     return redirect(url_for("index"))
 
+@app.route("/notify/<int:pid>", methods=["POST"])
+def notify(pid):
+    threading.Thread(target=tg_summary, args=(pid,), daemon=True).start()
+    return redirect(url_for("index"))
 
 @app.route("/product/<int:pid>")
 def detail(pid):
@@ -421,118 +490,91 @@ def detail(pid):
     minp = min(h["price"] for h in prices) if prices else None
     maxp = max(h["price"] for h in prices) if prices else None
     chg  = (cur - prices[0]["price"]) if prices and len(prices)>1 else None
+    cc   = "var(--green-text)" if chg and chg<0 else "var(--red)" if chg and chg>0 else "inherit"
+    cf   = (("+" if chg>0 else "")+fmt(chg)) if chg is not None else "—"
 
-    stats = f"""
-    <div class="stats">
+    sg = f"""<div class="stat-grid">
       <div class="sc"><div class="sl">Aktuální cena</div><div class="sv">{fmt(cur)}</div></div>
-      <div class="sc"><div class="sl">Minimum</div><div class="sv" style="color:var(--g)">{fmt(minp)}</div></div>
-      <div class="sc"><div class="sl">Maximum</div><div class="sv" style="color:var(--red)">{fmt(maxp)}</div></div>
-      <div class="sc"><div class="sl">Změna celkem</div>
-        <div class="sv" style="color:{'var(--g)' if chg and chg<0 else 'var(--red)' if chg and chg>0 else 'inherit'}">
-          {('+' if chg and chg>0 else '')+fmt(chg) if chg is not None else '—'}
-        </div>
-      </div>
+      <div class="sc"><div class="sl">Minimum</div><div class="sv svg">{fmt(minp)}</div></div>
+      <div class="sc"><div class="sl">Maximum</div><div class="sv svr">{fmt(maxp)}</div></div>
+      <div class="sc"><div class="sl">Změna celkem</div><div class="sv" style="color:{cc}">{cf}</div></div>
       <div class="sc"><div class="sl">Počet kontrol</div><div class="sv">{len(hist)}</div></div>
       <div class="sc"><div class="sl">Cílová cena</div><div class="sv">{fmt(p['target'])}</div></div>
     </div>"""
 
-    rows_html = ""
+    trs = ""
     for i in range(len(hist)-1, -1, -1):
         row  = hist[i]
-        prev = hist[i-1] if i > 0 else None
+        prev = hist[i-1] if i>0 else None
         if row.get("price") and prev and prev.get("price"):
             d = row["price"] - prev["price"]
-            if d < 0:   chg_td = f'<span class="dn">▼ {fmt(abs(d))}</span>'
-            elif d > 0: chg_td = f'<span class="up">▲ {fmt(d)}</span>'
-            else:       chg_td = '<span class="neu">—</span>'
-        else:
-            chg_td = '<span class="neu">—</span>'
-        alza_td   = '<span class="badge bf">🔥 Ano</span>' if row.get("alza_days") else "—"
-        coupon_td = f'<span class="badge bco">{row["coupon"]}</span>' if row.get("coupon") else "—"
-        rows_html += f"""<tr>
-          <td>{row['checked_at']}</td>
-          <td><b>{fmt(row.get('price'))}</b></td>
-          <td>{chg_td}</td><td>{alza_td}</td><td>{coupon_td}</td>
-        </tr>"""
+            if d<0:   td = f'<span class="tdn">↓ {fmt(abs(d))}</span>'
+            elif d>0: td = f'<span class="tup">↑ {fmt(d)}</span>'
+            else:     td = '<span class="tneu">—</span>'
+        else: td = '<span class="tneu">—</span>'
+        at = '<span class="badge bf">🔥</span>' if row.get("alza_days") else "—"
+        ct = f'<span class="badge bco">{row["coupon"]}</span>' if row.get("coupon") else "—"
+        trs += f'<tr><td style="color:var(--muted)">{row["checked_at"]}</td><td><b>{fmt(row.get("price"))}</b></td><td>{td}</td><td>{at}</td><td>{ct}</td></tr>'
 
-    detail_css = """
-    .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:20px}
-    .sc{background:var(--s);border:1px solid var(--b);border-radius:var(--r);padding:14px 16px}
-    .sl{font-size:11px;color:var(--m);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
-    .sv{font-size:19px;font-weight:700}
-    .chartcard{background:var(--s);border:1px solid var(--b);border-radius:var(--r);padding:20px;margin-bottom:20px}
-    .chartcard h2{font-size:11px;font-weight:600;color:var(--m);text-transform:uppercase;letter-spacing:.05em;margin-bottom:16px}
-    .chartwrap{height:260px;position:relative}
-    .tc{background:var(--s);border:1px solid var(--b);border-radius:var(--r);overflow:hidden}
-    .tc h2{font-size:11px;font-weight:600;color:var(--m);text-transform:uppercase;letter-spacing:.05em;padding:14px 18px;border-bottom:1px solid var(--b)}
-    table{width:100%;border-collapse:collapse;font-size:13px}
-    th{text-align:left;padding:9px 16px;font-size:11px;color:var(--m);text-transform:uppercase;
-      letter-spacing:.04em;background:var(--bg);border-bottom:1px solid var(--b)}
-    td{padding:10px 16px;border-bottom:1px solid var(--b)}
-    tr:last-child td{border-bottom:none}
-    tr:hover td{background:var(--bg)}
-    """
-
-    name_disp = p["name"] or p["url"]
+    nd = p["name"] or p["url"]
     return f"""<!DOCTYPE html>
 <html lang="cs"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{name_disp} – Historie</title>
+<title>{nd}</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<style>{CSS}{detail_css}</style>
+<style>{CSS}</style>
 </head><body>
-<div class="bar">
-  <a href="/" style="font-size:13px;color:var(--m)">← Zpět</a>
-  <div style="font-size:14px;font-weight:600;flex:1;margin:0 12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{name_disp}</div>
-  <a href="{p['url']}" target="_blank" style="font-size:12px;color:var(--bc)">Otevřít na Alze ↗</a>
-</div>
-<div class="wrap">
-  {stats}
-  <div class="chartcard">
+<nav class="nav">
+  <a href="/" style="font-size:14px;color:var(--muted);font-weight:500">← Zpět</a>
+  <div style="font-size:15px;font-weight:600;flex:1;margin:0 16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.2px">{nd}</div>
+  <a href="{p['url']}" target="_blank" style="font-size:13px;font-weight:500;color:var(--accent)">Otevřít na Alze ↗</a>
+</nav>
+<div class="main">
+  {sg}
+  <div class="chart-card">
     <h2>Vývoj ceny</h2>
-    <div class="chartwrap"><canvas id="ch"></canvas></div>
+    <div class="chart-wrap"><canvas id="ch"></canvas></div>
   </div>
-  <div class="tc">
+  <div class="table-card">
     <h2>Záznamy</h2>
-    <table>
-      <thead><tr><th>Čas</th><th>Cena</th><th>Změna</th><th>AlzaDny</th><th>Kupon</th></tr></thead>
-      <tbody>{rows_html}</tbody>
-    </table>
+    <table><thead><tr><th>Čas</th><th>Cena</th><th>Změna</th><th>AlzaDny</th><th>Kupon</th></tr></thead>
+    <tbody>{trs}</tbody></table>
   </div>
 </div>
 <script>
 const H={json.dumps(prices)};
-const labels=H.map(h=>{{const d=new Date(h.checked_at);return d.toLocaleDateString('cs-CZ',{{day:'2-digit',month:'2-digit'}})+' '+d.toLocaleTimeString('cs-CZ',{{hour:'2-digit',minute:'2-digit'}});}});
+const labels=H.map(h=>{{const d=new Date(h.checked_at);
+  return d.toLocaleDateString('cs-CZ',{{day:'2-digit',month:'2-digit'}})+' '+
+         d.toLocaleTimeString('cs-CZ',{{hour:'2-digit',minute:'2-digit'}});}});
 const vals=H.map(h=>h.price);
 const target={p['target'] or 'null'};
 new Chart(document.getElementById('ch'),{{
-  type:'line',
-  data:{{labels,datasets:[
-    {{label:'Cena (Kč)',data:vals,borderColor:'#e52213',borderWidth:2,
-      backgroundColor:'rgba(229,34,19,0.06)',fill:true,tension:0.35,
-      pointRadius:vals.length<30?4:2,pointBackgroundColor:'#e52213',pointHoverRadius:6}},
+  type:'line',data:{{labels,datasets:[
+    {{label:'Cena',data:vals,borderColor:'#007aff',borderWidth:2.5,
+      backgroundColor:'rgba(0,122,255,0.07)',fill:true,tension:0.4,
+      pointRadius:vals.length<40?4:0,pointBackgroundColor:'#007aff',
+      pointBorderColor:'#fff',pointBorderWidth:2,pointHoverRadius:6}},
     ...(target?[{{label:'Cílová cena',data:vals.map(()=>target),
-      borderColor:'#166534',borderWidth:1.5,borderDash:[5,4],pointRadius:0,fill:false}}]:[])
+      borderColor:'#34c759',borderWidth:1.5,borderDash:[6,4],pointRadius:0,fill:false}}]:[])
   ]}},
   options:{{responsive:true,maintainAspectRatio:false,
     interaction:{{intersect:false,mode:'index'}},
     plugins:{{
-      legend:{{display:!!target,position:'top',labels:{{font:{{size:12}},boxWidth:18}}}},
-      tooltip:{{callbacks:{{label:c=>`${{c.dataset.label}}: ${{c.parsed.y.toLocaleString('cs-CZ')}} Kč`}}}},
+      legend:{{display:!!target,position:'top',labels:{{font:{{size:12}},boxWidth:14,padding:14}}}},
+      tooltip:{{backgroundColor:'rgba(28,28,30,.92)',titleFont:{{size:12,weight:'600'}},
+        bodyFont:{{size:13}},padding:10,cornerRadius:10,
+        callbacks:{{label:c=>`  ${{c.dataset.label}}: ${{c.parsed.y.toLocaleString('cs-CZ')}} Kč`}}}},
     }},
     scales:{{
-      x:{{grid:{{display:false}},ticks:{{font:{{size:11}},maxTicksLimit:8}}}},
-      y:{{grid:{{color:'rgba(0,0,0,0.04)'}},ticks:{{font:{{size:11}},callback:v=>v.toLocaleString('cs-CZ')+' Kč'}}}},
+      x:{{grid:{{display:false}},ticks:{{font:{{size:11}},color:'#8e8e93',maxTicksLimit:8}}}},
+      y:{{grid:{{color:'rgba(0,0,0,0.04)'}},ticks:{{font:{{size:11}},color:'#8e8e93',callback:v=>v.toLocaleString('cs-CZ')+' Kč'}}}},
     }},
   }},
 }});
-</script>
-</body></html>"""
-
+</script></body></html>"""
 
 @app.route("/health")
-def health():
-    return "ok"
+def health(): return "ok"
 
 @app.route("/api/history/<int:pid>")
 def api_history(pid):
@@ -545,7 +587,7 @@ def api_history(pid):
 
 init_db()
 scheduler = BackgroundScheduler()
-scheduler.add_job(check_all, "interval", minutes=CHECK_INTERVAL)
+scheduler.add_job(check_all, "cron", hour=CHECK_HOUR, minute=0)
 scheduler.start()
 
 if __name__ == "__main__":
