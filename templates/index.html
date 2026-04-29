@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alza Tracker</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f5f5f3;--surface:#fff;--border:#e4e4e0;
+  --text:#181816;--muted:#686863;
+  --red:#e52213;--red-bg:#fef2f1;--red-dark:#b91c0f;
+  --green:#166534;--green-bg:#f0fdf4;
+  --amber:#92400e;--amber-bg:#fffbeb;
+  --blue:#1d4ed8;--blue-bg:#eff6ff;
+  --r:10px;--rs:6px;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
+a{color:inherit;text-decoration:none}
+
+/* topbar */
+.topbar{background:var(--surface);border-bottom:1px solid var(--border);height:54px;display:flex;align-items:center;justify-content:space-between;padding:0 24px;position:sticky;top:0;z-index:50}
+.logo{font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px}
+.logo-dot{width:8px;height:8px;background:var(--red);border-radius:50%}
+.topbar-right{display:flex;align-items:center;gap:8px}
+.interval-badge{font-size:12px;color:var(--muted);background:var(--bg);border:1px solid var(--border);border-radius:20px;padding:3px 10px}
+
+/* main */
+.main{max-width:900px;margin:0 auto;padding:24px 16px}
+
+/* alert */
+.alert{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:var(--rs);margin-bottom:20px;font-size:13px}
+.alert-warn{background:var(--amber-bg);border:1px solid #fcd34d;color:var(--amber)}
+.alert-ok{background:var(--green-bg);border:1px solid #86efac;color:var(--green)}
+
+/* add form */
+.add-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:20px;margin-bottom:24px}
+.add-card-title{font-size:13px;font-weight:600;margin-bottom:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.form-row{display:flex;gap:10px;flex-wrap:wrap}
+.fg{display:flex;flex-direction:column;gap:4px;flex:1;min-width:200px}
+.fg.lg{flex:3;min-width:280px}
+.fg label{font-size:11px;color:var(--muted);font-weight:500;text-transform:uppercase;letter-spacing:.04em}
+.fg input{padding:8px 11px;border:1px solid var(--border);border-radius:var(--rs);font-size:13px;background:var(--bg);color:var(--text);outline:none;transition:border .15s}
+.fg input:focus{border-color:var(--red);background:var(--surface)}
+.fg-btn{display:flex;align-items:flex-end}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:var(--rs);border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;cursor:pointer;white-space:nowrap;transition:background .15s}
+.btn:hover{background:var(--bg)}
+.btn-red{background:var(--red);color:#fff;border-color:var(--red)}
+.btn-red:hover{background:var(--red-dark)}
+.btn-sm{padding:5px 11px;font-size:12px}
+.btn-ghost{border-color:transparent;background:transparent}
+.btn-ghost:hover{background:var(--bg)}
+
+/* section header */
+.sec-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.sec-title{font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+
+/* product cards */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);margin-bottom:10px;overflow:hidden}
+.card.paused{opacity:.5}
+.card-body{display:flex;align-items:center;gap:12px;padding:14px 18px;flex-wrap:wrap}
+.card-info{flex:1;min-width:0}
+.card-name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-url{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.card-url a{color:var(--blue)}
+.card-badges{display:flex;flex-wrap:wrap;gap:5px;min-width:180px}
+.badge{display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:500;padding:3px 8px;border-radius:20px}
+.b-fire{background:var(--amber-bg);color:var(--amber)}
+.b-target{background:var(--green-bg);color:var(--green)}
+.b-coupon{background:var(--blue-bg);color:var(--blue)}
+.b-paused{background:var(--bg);color:var(--muted)}
+.card-price{text-align:right;min-width:120px}
+.price-val{font-size:21px;font-weight:700;line-height:1.2}
+.price-change{font-size:11px;margin-top:2px}
+.down{color:var(--green)}
+.up{color:var(--red)}
+.neu{color:var(--muted)}
+.card-actions{display:flex;gap:5px;align-items:center}
+.card-foot{background:var(--bg);border-top:1px solid var(--border);padding:8px 18px;display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--muted)}
+.foot-left{display:flex;gap:14px}
+
+/* empty */
+.empty{text-align:center;padding:60px 20px;color:var(--muted)}
+.empty svg{margin:0 auto 12px;display:block;opacity:.3}
+.empty h3{font-size:16px;font-weight:600;color:var(--text);margin-bottom:4px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo"><div class="logo-dot"></div>Alza Tracker</div>
+  <div class="topbar-right">
+    <span class="interval-badge">kontrola každých {{ interval }} min</span>
+    <form method="post" action="/check_all" style="display:none" id="checkAllForm"></form>
+    <button class="btn btn-sm" onclick="document.getElementById('checkAllForm').submit()">↻ Zkontrolovat vše</button>
+  </div>
+</div>
+
+<div class="main">
+
+  {% if not tg_ok %}
+  <div class="alert alert-warn">
+    ⚠ Telegram není nakonfigurován — nastav proměnné <b>TELEGRAM_TOKEN</b> a <b>TELEGRAM_CHAT_ID</b> v Render dashboardu.
+  </div>
+  {% else %}
+  <div class="alert alert-ok">
+    ✓ Telegram notifikace jsou aktivní
+  </div>
+  {% endif %}
+
+  <div class="add-card">
+    <div class="add-card-title">Přidat produkt</div>
+    <form method="post" action="/add">
+      <div class="form-row">
+        <div class="fg lg">
+          <label>URL produktu na Alze</label>
+          <input type="url" name="url" placeholder="https://www.alza.cz/nazev-produktu.htm" required>
+        </div>
+        <div class="fg">
+          <label>Cílová cena (Kč) — nepovinné</label>
+          <input type="number" name="target" placeholder="např. 15 000" min="0" step="1">
+        </div>
+        <div class="fg-btn">
+          <button class="btn btn-red" type="submit">+ Přidat</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <div class="sec-head">
+    <span class="sec-title">Sledované produkty</span>
+    <span style="font-size:12px;color:var(--muted)">{{ data|length }} celkem</span>
+  </div>
+
+  {% if not data %}
+  <div class="empty">
+    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 7H4a2 2 0 00-2 2v6a2 2 0 002 2h16a2 2 0 002-2V9a2 2 0 00-2-2z"/><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16"/></svg>
+    <h3>Žádné produkty</h3>
+    <p>Vlož URL produktu z Alzy a začni sledovat ceny.</p>
+  </div>
+  {% endif %}
+
+  {% for item in data %}
+  {% set p = item.p %}
+  {% set lat = item.latest %}
+  <div class="card {% if not p.active %}paused{% endif %}">
+    <div class="card-body">
+
+      <div class="card-info">
+        <div class="card-name">{{ p.name or '⏳ Načítám…' }}</div>
+        <div class="card-url"><a href="{{ p.url }}" target="_blank">{{ p.url[:70] }}{% if p.url|length > 70 %}…{% endif %}</a></div>
+      </div>
+
+      <div class="card-badges">
+        {% if not p.active %}<span class="badge b-paused">⏸ Pozastaveno</span>{% endif %}
+        {% if lat and lat.alza_days %}<span class="badge b-fire">🔥 AlzaDny</span>{% endif %}
+        {% if lat and lat.coupon %}<span class="badge b-coupon">🎫 {{ lat.coupon[:20] }}</span>{% endif %}
+        {% if p.target %}<span class="badge b-target">Cíl: {{ "{:,.0f}".format(p.target).replace(",", " ") }} Kč</span>{% endif %}
+      </div>
+
+      <div class="card-price">
+        {% if lat and lat.price %}
+          <div class="price-val">{{ "{:,.0f}".format(lat.price).replace(",", " ") }} Kč</div>
+          {% if item.change is not none %}
+            {% if item.change < 0 %}
+              <div class="price-change down">▼ {{ "{:,.0f}".format(item.change|abs).replace(",", " ") }} Kč</div>
+            {% elif item.change > 0 %}
+              <div class="price-change up">▲ {{ "{:,.0f}".format(item.change).replace(",", " ") }} Kč</div>
+            {% else %}
+              <div class="price-change neu">— beze změny</div>
+            {% endif %}
+          {% else %}
+            <div class="price-change neu">— první záznam</div>
+          {% endif %}
+        {% else %}
+          <div style="font-size:13px;color:var(--muted)">Čekám…</div>
+        {% endif %}
+      </div>
+
+      <div class="card-actions">
+        <a href="/product/{{ p.id }}" class="btn btn-sm">📈 Historie</a>
+        <form method="post" action="/check/{{ p.id }}"><button class="btn btn-sm btn-ghost" title="Zkontrolovat teď">↻</button></form>
+        <form method="post" action="/toggle/{{ p.id }}"><button class="btn btn-sm btn-ghost" title="{{ 'Pozastavit' if p.active else 'Aktivovat' }}">{{ '⏸' if p.active else '▶' }}</button></form>
+        <form method="post" action="/delete/{{ p.id }}" onsubmit="return confirm('Smazat produkt a celou historii?')"><button class="btn btn-sm btn-ghost" style="color:var(--red)" title="Smazat">✕</button></form>
+      </div>
+
+    </div>
+    <div class="card-foot">
+      <div class="foot-left">
+        {% if item.lowest %}<span>Min: <b>{{ "{:,.0f}".format(item.lowest).replace(",", " ") }} Kč</b></span>{% endif %}
+        <span>{{ item.checks }} kontrol</span>
+      </div>
+      <span>{{ lat.checked_at if lat else 'zatím nekontrolováno' }}</span>
+    </div>
+  </div>
+  {% endfor %}
+
+</div>
+
+<form method="post" action="/check_all" id="checkAllForm" style="display:none"></form>
+
+</body>
+</html>
