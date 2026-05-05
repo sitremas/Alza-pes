@@ -5,11 +5,15 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2
     envVars:
+      - key: DATABASE_URL
+        sync: false          # vloz Supabase connection string
+      - key: SECRET_KEY
+        generateValue: true
       - key: TELEGRAM_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
-      - key: CHECK_INTERVAL
-        value: "60"
-      - key: DB_PATH
-        value: "tracker.db"
+      - key: APP_PIN
+        sync: false
+      - key: CHECK_HOUR
+        value: "9"
