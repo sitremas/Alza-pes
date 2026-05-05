@@ -1,4 +1,4 @@
-import requests, json, re, os, logging, time, threading
+import sqlite3, requests, json, re, os, logging, time, threading
 from bs4 import BeautifulSoup
 from flask import Flask, request, redirect, url_for, jsonify, session
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -7,18 +7,21 @@ from functools import wraps
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-app = Flask(__name__)
-app.secret_key     = os.environ.get("SECRET_KEY", "alza-tracker-secret-change-me")
-DATABASE_URL     = os.environ.get("DATABASE_URL", "")   # Supabase connection string
-_SQLITE_PATH     = os.environ.get("DB_PATH", "tracker.db")
-_USE_PG          = bool(DATABASE_URL)
-
-if _USE_PG:
+try:
     import psycopg2, psycopg2.extras
-    _DBError = psycopg2.IntegrityError
-else:
-    import sqlite3
-    _DBError = sqlite3.IntegrityError
+    _PSYCOPG2_OK = True
+except ImportError:
+    _PSYCOPG2_OK = False
+    log.warning("psycopg2 not available, using SQLite")
+
+app = Flask(__name__)
+app.secret_key   = os.environ.get("SECRET_KEY", "alza-tracker-secret-change-me")
+DATABASE_URL     = os.environ.get("DATABASE_URL", "")
+_SQLITE_PATH     = os.environ.get("DB_PATH", "tracker.db")
+_USE_PG          = bool(DATABASE_URL) and _PSYCOPG2_OK
+_DBError         = (psycopg2.IntegrityError if _USE_PG else sqlite3.IntegrityError)
+
+log.info("DB backend: %s", "PostgreSQL/Supabase" if _USE_PG else "SQLite")
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 SCRAPE_DO_TOKEN  = os.environ.get("SCRAPE_DO_TOKEN", "")
@@ -97,7 +100,11 @@ class _Db:
 
     def __init__(self):
         if _USE_PG:
-            self._conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+            # Build connection — avoid duplicate sslmode if URL already contains it
+            dsn = DATABASE_URL
+            if "sslmode" not in dsn:
+                dsn = dsn + ("&" if "?" in dsn else "?") + "sslmode=require"
+            self._conn = psycopg2.connect(dsn)
         else:
             self._conn = sqlite3.connect(_SQLITE_PATH)
             self._conn.row_factory = sqlite3.Row
@@ -916,10 +923,20 @@ def api_history(pid):
 
 # ── Start ────────────────────────────────────────────────────────────────────────
 
-init_db()
+try:
+    init_db()
+    log.info("init_db OK")
+except Exception as e:
+    log.error("init_db FAILED: %s", e, exc_info=True)
+    raise SystemExit(1)
+
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_all, "cron", hour=CHECK_HOUR, minute=0)
-scheduler.start()
+try:
+    scheduler.start()
+    log.info("scheduler started")
+except Exception as e:
+    log.error("scheduler failed: %s", e)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
