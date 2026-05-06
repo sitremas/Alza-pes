@@ -336,6 +336,14 @@ def fmt(n):
     if n is None: return "&#8212;"
     return "{:,.0f}".format(n).replace(",", "\u00a0") + "\u00a0K&ccedil;"
 
+def fmt_dt(v):
+    """Hezky naformatuj datetime/string pro zobrazeni."""
+    if v is None: return ""
+    s = str(v)
+    # rozdelit na sekundy a zahodit zbytek (mikrosekundy v PostgreSQL)
+    if "." in s: s = s.split(".")[0]
+    return s
+
 def logout_btn_html():
     if not APP_PIN: return ""
     return '<form method="post" action="/logout"><button class="btn btn-ghost btn-sm">Odhlasit</button></form>'
@@ -622,7 +630,7 @@ def index():
         if item["low"]:
             fl += '<span>Min&nbsp;<b>{}</b></span>'.format(fmt(item["low"]))
         fl += '<span>{}&nbsp;kontrol</span>'.format(item["chks"])
-        fr  = lat["checked_at"] if lat else "zatim nekontrolovano"
+        fr  = fmt_dt(lat["checked_at"]) if lat else "zatim nekontrolovano"
         nd  = p["name"] or "Nacitam&hellip;"
         us  = p["url"][:65] + ("&hellip;" if len(p["url"]) > 65 else "")
         cls = "card paused" if not p["active"] else "card"
@@ -806,11 +814,11 @@ def detail(pid):
             "<td style='color:var(--muted)'>{t}</td>"
             "<td><b>{p}</b></td><td>{d}</td><td>{a}</td><td>{c}</td>"
             "</tr>"
-        ).format(t=row["checked_at"], p=fmt(row.get("price")), d=td, a=at, c=ct)
+        ).format(t=fmt_dt(row["checked_at"]), p=fmt(row.get("price")), d=td, a=at, c=ct)
 
     nd = p["name"] or p["url"]
     target_js = str(p["target"]) if p["target"] else "null"
-    hist_json = json.dumps(prices)
+    hist_json = json.dumps(prices, default=str)
 
     page = (
         '<!DOCTYPE html>'
