@@ -303,20 +303,23 @@ def check_product(pid):
     c.execute("INSERT INTO history (product_id,price,alza_days,coupon) VALUES (?,?,?,?)",
               (pid, price, 1 if result["alza_days"] else 0, result["coupon"]))
     c.commit()
-    prev = c.execute("SELECT price FROM history WHERE product_id=? ORDER BY id DESC LIMIT 1 OFFSET 1", (pid,)).fetchone()
+    prev = c.execute("SELECT price, alza_days, coupon FROM history WHERE product_id=? ORDER BY id DESC LIMIT 1 OFFSET 1", (pid,)).fetchone()
     c.close()
     if price is None: return
     if prev and prev["price"] and price < prev["price"]:
         diff = prev["price"] - price
         tg("Pokles ceny!\n{}\n\n<b>{:,.0f} Kc</b> (pokles {:,.0f} Kc)\n{}".format(
             name, price, diff, p["url"]).replace(",", "\u00a0"))
-    if p["target"] and price <= p["target"]:
+    # Notify only when price first drops to/below target (transition from above)
+    if p["target"] and price <= p["target"] and (not prev or not prev["price"] or prev["price"] > p["target"]):
         tg("Cilova cena dosazena!\n{}\n\n<b>{:,.0f} Kc</b>\n{}".format(
             name, price, p["url"]).replace(",", "\u00a0"))
-    if result["alza_days"]:
+    # Notify only when AlzaDny newly become active
+    if result["alza_days"] and (not prev or not prev["alza_days"]):
         tg("AlzaDny jsou aktivni!\n{}\n\n{:,.0f} Kc\n{}".format(
             name, price, p["url"]).replace(",", "\u00a0"))
-    if result["coupon"]:
+    # Notify only when a new or different coupon appears
+    if result["coupon"] and (not prev or prev["coupon"] != result["coupon"]):
         tg("Kupon: <code>{}</code>\n{}\n{:,.0f} Kc\n{}".format(
             result["coupon"], name, price, p["url"]).replace(",", "\u00a0"))
     log.info("[%s] %.0f Kc alza_days=%s", name, price, result["alza_days"])
@@ -334,7 +337,7 @@ def check_all():
 
 def fmt(n):
     if n is None: return "&#8212;"
-    return "{:,.0f}".format(n).replace(",", "\u00a0") + "\u00a0K&ccedil;"
+    return "{:,.0f}".format(n).replace(",", "\u00a0") + "\u00a0K\u010d"
 
 def fmt_dt(v):
     """Hezky naformatuj datetime/string pro zobrazeni."""
