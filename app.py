@@ -337,7 +337,7 @@ def check_all():
 
 def fmt(n):
     if n is None: return "&#8212;"
-    return "{:,.0f}".format(n).replace(",", "\u00a0") + "\u00a0K&ccedil;"
+    return "{:,.0f}".format(n).replace(",", "\u00a0") + "\u00a0K\u010d"
 
 def fmt_dt(v):
     """Hezky naformatuj datetime/string pro zobrazeni."""
