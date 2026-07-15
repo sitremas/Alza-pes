@@ -155,6 +155,7 @@ def init_db():
                     id         SERIAL PRIMARY KEY,
                     product_id INTEGER NOT NULL,
                     price      FLOAT,
+                    coupon_price FLOAT,
                     alza_days  INTEGER DEFAULT 0,
                     coupon     TEXT,
                     checked_at TIMESTAMP DEFAULT NOW(),
@@ -177,6 +178,7 @@ def init_db():
                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
                     product_id INTEGER NOT NULL,
                     price      REAL,
+                    coupon_price REAL,
                     alza_days  INTEGER DEFAULT 0,
                     coupon     TEXT,
                     checked_at TEXT DEFAULT (datetime('now','localtime')),
@@ -184,6 +186,14 @@ def init_db():
                 )
             """)
     log.info("DB ready (%s)", "PostgreSQL/Supabase" if _USE_PG else "SQLite")
+    # migrace: pridani coupon_price do existujici DB
+    with get_db() as c:
+        try:
+            c.execute("ALTER TABLE history ADD COLUMN coupon_price {}".format(
+                "FLOAT" if _USE_PG else "REAL"))
+            log.info("Migrace: pridan sloupec coupon_price")
+        except Exception:
+            pass  # sloupec uz existuje
 
 # ── Scraper ─────────────────────────────────────────────────────────────────────
 
@@ -241,12 +251,35 @@ def scrape(url):
     page = r.text.lower()
     alza_days = any(k in page for k in ["alzadny", "alza dny", "alza-dny"])
     coupon = None
+    coupon_price = None
     for cls in ["coupon", "voucher", "kupon", "promo-code"]:
         el = soup.find(class_=re.compile(cls, re.I))
         if el:
             t = el.get_text(strip=True)[:60]
             if t: coupon = t; break
-    return {"name": name, "price": price, "alza_days": alza_days, "coupon": coupon}
+    # cena po uplatneni kuponu: hledej v okoli kuponoveho bloku / zvyraznene ceny
+    if coupon:
+        # 1) blok s cenou po kuponu (Alza casto pouziva "s kodem"/"po slevě")
+        cp_el = soup.find(class_=re.compile(r"coupon.*price|price.*coupon|discount.*price|price.*discount", re.I))
+        if not cp_el:
+            # 2) hledej text "s kodem"/"s kuponem" a cislo poblíž
+            for kw in ["s kodem", "s kódem", "s kuponem", "po sleve", "po slevě", "with code"]:
+                node = soup.find(string=re.compile(re.escape(kw), re.I))
+                if node:
+                    ctx = node.parent.get_text(" ", strip=True) if node.parent else str(node)
+                    m = re.search(r"(\d[\d\s\u00a0]{2,})", ctx.replace(",", "."))
+                    if m:
+                        try:
+                            v = float(m.group(1).replace(" ", "").replace("\u00a0", ""))
+                            if v > 10: coupon_price = v; break
+                        except Exception: pass
+        else:
+            nums = re.findall(r"\d+", cp_el.get_text().replace("\xa0", "").replace(" ", ""))
+            for n in nums:
+                v = float(n)
+                if v > 10: coupon_price = v; break
+    return {"name": name, "price": price, "alza_days": alza_days,
+            "coupon": coupon, "coupon_price": coupon_price}
 
 # ── Telegram ────────────────────────────────────────────────────────────────────
 
@@ -271,15 +304,22 @@ def tg_summary(pid):
     c.close()
     name  = p["name"] or "Produkt"
     price = lat["price"] if lat and lat["price"] else None
+    coupon_price = None
+    try: coupon_price = lat["coupon_price"] if lat else None
+    except (KeyError, IndexError): coupon_price = None
+    eff = coupon_price if coupon_price else price
     lines = ["<b>{}</b>".format(name)]
-    if price:
+    if coupon_price:
+        lines.append("\n Cena s kuponem: <b>{:,.0f} Kc</b>".format(coupon_price).replace(",", "\u00a0"))
+        lines.append("Bezna cena: {:,.0f} Kc".format(price).replace(",", "\u00a0"))
+    elif price:
         lines.append("\n Aktualni cena: <b>{:,.0f} Kc</b>".format(price).replace(",", "\u00a0"))
     if minp and minp["m"]:
         lines.append("Historicke minimum: <b>{:,.0f} Kc</b>".format(minp["m"]).replace(",", "\u00a0"))
     if p["target"]:
         lines.append("Cilova cena: <b>{:,.0f} Kc</b>".format(p["target"]).replace(",", "\u00a0"))
-        if price:
-            diff = price - p["target"]
+        if eff:
+            diff = eff - p["target"]
             if diff <= 0: lines.append("Cilova cena <b>dosazena!</b>")
             else: lines.append("Chybi: <b>{:,.0f} Kc</b>".format(diff).replace(",", "\u00a0"))
     if lat and lat["alza_days"]: lines.append("<b>AlzaDny jsou aktivni!</b>")
@@ -297,32 +337,46 @@ def check_product(pid):
     result = scrape(p["url"])
     if not result: c.close(); return
     price = result["price"]
+    coupon_price = result.get("coupon_price")
     name  = result["name"] or p["name"] or "Produkt"
     if result["name"] and result["name"] != p["name"]:
         c.execute("UPDATE products SET name=? WHERE id=?", (result["name"], pid))
-    c.execute("INSERT INTO history (product_id,price,alza_days,coupon) VALUES (?,?,?,?)",
-              (pid, price, 1 if result["alza_days"] else 0, result["coupon"]))
+    c.execute("INSERT INTO history (product_id,price,coupon_price,alza_days,coupon) VALUES (?,?,?,?,?)",
+              (pid, price, coupon_price, 1 if result["alza_days"] else 0, result["coupon"]))
     c.commit()
-    prev = c.execute("SELECT price, alza_days, coupon FROM history WHERE product_id=? ORDER BY id DESC LIMIT 1 OFFSET 1", (pid,)).fetchone()
+    prev = c.execute("SELECT price, coupon_price, alza_days, coupon FROM history WHERE product_id=? ORDER BY id DESC LIMIT 1 OFFSET 1", (pid,)).fetchone()
     c.close()
     if price is None: return
-    if prev and prev["price"] and price < prev["price"]:
-        diff = prev["price"] - price
-        tg("Pokles ceny!\n{}\n\n<b>{:,.0f} Kc</b> (pokles {:,.0f} Kc)\n{}".format(
-            name, price, diff, p["url"]).replace(",", "\u00a0"))
-    # Notify only when price first drops to/below target (transition from above)
-    if p["target"] and price <= p["target"] and (not prev or not prev["price"] or prev["price"] > p["target"]):
-        tg("Cilova cena dosazena!\n{}\n\n<b>{:,.0f} Kc</b>\n{}".format(
-            name, price, p["url"]).replace(",", "\u00a0"))
-    # Notify only when AlzaDny newly become active
-    if result["alza_days"] and (not prev or not prev["alza_days"]):
-        tg("AlzaDny jsou aktivni!\n{}\n\n{:,.0f} Kc\n{}".format(
-            name, price, p["url"]).replace(",", "\u00a0"))
-    # Notify only when a new or different coupon appears
-    if result["coupon"] and (not prev or prev["coupon"] != result["coupon"]):
-        tg("Kupon: <code>{}</code>\n{}\n{:,.0f} Kc\n{}".format(
-            result["coupon"], name, price, p["url"]).replace(",", "\u00a0"))
-    log.info("[%s] %.0f Kc alza_days=%s", name, price, result["alza_days"])
+
+    # efektivni cena = cena po kuponu, pokud je kupon aktivni, jinak bezna cena
+    eff_now  = coupon_price if coupon_price else price
+    prev_price = prev["price"] if prev else None
+    prev_cp = None
+    try: prev_cp = prev["coupon_price"] if prev else None
+    except (KeyError, IndexError): prev_cp = None
+    eff_prev = prev_cp if prev_cp else prev_price
+
+    # JEDNA notifikace, pouze kdyz efektivni cena skutecne klesne
+    if eff_prev and eff_now < eff_prev:
+        diff = eff_prev - eff_now
+        lines = ["Pokles ceny!", "<b>{}</b>".format(name), ""]
+        if coupon_price:
+            lines.append("Cena s kuponem: <b>{:,.0f} Kc</b>".format(coupon_price).replace(",", "\u00a0"))
+            lines.append("Bezna cena: {:,.0f} Kc".format(price).replace(",", "\u00a0"))
+            if result["coupon"]:
+                lines.append("Kupon: <code>{}</code>".format(result["coupon"]))
+        else:
+            lines.append("<b>{:,.0f} Kc</b>".format(price).replace(",", "\u00a0"))
+        lines.append("(pokles {:,.0f} Kc)".format(diff).replace(",", "\u00a0"))
+        if p["target"] and eff_now <= p["target"]:
+            lines.append("Cilova cena <b>dosazena!</b>")
+        if result["alza_days"]:
+            lines.append("AlzaDny jsou aktivni")
+        lines.append(p["url"])
+        tg("\n".join(lines))
+
+    log.info("[%s] %.0f Kc (eff %.0f) coupon=%s alza_days=%s",
+             name, price, eff_now, result["coupon"], result["alza_days"])
 
 def check_all():
     c = get_db()
@@ -583,12 +637,19 @@ def index():
     rows = []
     for p in products:
         lat  = c.execute("SELECT * FROM history WHERE product_id=? ORDER BY id DESC LIMIT 1", (p["id"],)).fetchone()
-        prev = c.execute("SELECT price FROM history WHERE product_id=? ORDER BY id DESC LIMIT 1 OFFSET 1", (p["id"],)).fetchone()
+        prev = c.execute("SELECT price, coupon_price FROM history WHERE product_id=? ORDER BY id DESC LIMIT 1 OFFSET 1", (p["id"],)).fetchone()
         low  = c.execute("SELECT MIN(price) as m FROM history WHERE product_id=? AND price IS NOT NULL", (p["id"],)).fetchone()
         chks = c.execute("SELECT COUNT(*) as n FROM history WHERE product_id=?", (p["id"],)).fetchone()
         chg  = None
-        if lat and lat["price"] and prev and prev["price"]:
-            chg = lat["price"] - prev["price"]
+        def _eff(row):
+            if not row: return None
+            cp = None
+            try: cp = row["coupon_price"]
+            except (KeyError, IndexError): cp = None
+            return cp if cp else row["price"]
+        e_lat, e_prev = _eff(lat), _eff(prev)
+        if e_lat and e_prev:
+            chg = e_lat - e_prev
         rows.append(dict(p=dict(p), lat=dict(lat) if lat else None,
                          low=low["m"], chg=chg, chks=chks["n"]))
     c.close()
@@ -606,7 +667,12 @@ def index():
         p   = item["p"]
         lat = item["lat"]
         if lat and lat.get("price"):
-            ph = '<div class="price-main">{}</div>'.format(fmt(lat["price"]))
+            cp = lat.get("coupon_price")
+            if cp:
+                ph = '<div class="price-main">{}</div>'.format(fmt(cp))
+                ph += '<div class="price-delta dn2" style="text-decoration:line-through;opacity:.6">{}</div>'.format(fmt(lat["price"]))
+            else:
+                ph = '<div class="price-main">{}</div>'.format(fmt(lat["price"]))
             if item["chg"] is not None:
                 if item["chg"] < 0:
                     ph += '<div class="price-delta dd">&#x2193; {}</div>'.format(fmt(abs(item["chg"])))

@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ p.name or 'Produkt' }} – Historie</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#f5f5f3;--surface:#fff;--border:#e4e4e0;--text:#181816;--muted:#686863;--red:#e52213;--green:#166534;--green-bg:#f0fdf4;--red-bg:#fef2f1;--amber:#92400e;--amber-bg:#fffbeb;--blue:#1d4ed8;--r:10px;--rs:6px}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text);font-size:14px}
+a{color:inherit;text-decoration:none}
+.topbar{background:var(--surface);border-bottom:1px solid var(--border);height:54px;display:flex;align-items:center;padding:0 24px;gap:12px;position:sticky;top:0;z-index:50}
+.back{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px}
+.back:hover{color:var(--text)}
+.topbar-name{font-size:14px;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ext{font-size:12px;color:var(--blue)}
+.main{max-width:900px;margin:0 auto;padding:24px 16px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:20px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px}
+.stat-l{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
+.stat-v{font-size:20px;font-weight:700}
+.stat-v.g{color:var(--green)}.stat-v.r{color:var(--red)}
+.chart-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:20px;margin-bottom:20px}
+.chart-card h2{font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:16px}
+.chart-wrap{height:260px;position:relative}
+.table-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+.table-card h2{font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;padding:14px 18px;border-bottom:1px solid var(--border)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:9px 16px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;background:var(--bg);border-bottom:1px solid var(--border)}
+td{padding:10px 16px;border-bottom:1px solid var(--border)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--bg)}
+.badge{display:inline-flex;align-items:center;font-size:11px;font-weight:500;padding:2px 7px;border-radius:20px}
+.b-fire{background:var(--amber-bg);color:var(--amber)}
+.b-coupon{background:#eff6ff;color:var(--blue)}
+.dn{color:var(--green);font-weight:600}.up{color:var(--red)}.neu{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <a href="/" class="back">← Zpět</a>
+  <div class="topbar-name">{{ p.name or p.url }}</div>
+  <a href="{{ p.url }}" target="_blank" class="ext">Otevřít na Alze ↗</a>
+</div>
+
+<div class="main">
+  {% set prices = history | selectattr('price') | list %}
+  {% if prices %}
+    {% set cur = prices[-1].price %}
+    {% set minp = prices | map(attribute='price') | min %}
+    {% set maxp = prices | map(attribute='price') | max %}
+    {% set chg = cur - prices[0].price %}
+  {% endif %}
+
+  <div class="stats">
+    <div class="stat"><div class="stat-l">Aktuální cena</div><div class="stat-v">{% if prices %}{{ "{:,.0f}".format(cur).replace(",", " ") }} Kč{% else %}—{% endif %}</div></div>
+    <div class="stat"><div class="stat-l">Minimum</div><div class="stat-v g">{% if prices %}{{ "{:,.0f}".format(minp).replace(",", " ") }} Kč{% else %}—{% endif %}</div></div>
+    <div class="stat"><div class="stat-l">Maximum</div><div class="stat-v r">{% if prices %}{{ "{:,.0f}".format(maxp).replace(",", " ") }} Kč{% else %}—{% endif %}</div></div>
+    <div class="stat"><div class="stat-l">Změna celkem</div>
+      <div class="stat-v {% if prices %}{% if chg < 0 %}g{% elif chg > 0 %}r{% endif %}{% endif %}">
+        {% if prices %}{% if chg > 0 %}+{% endif %}{{ "{:,.0f}".format(chg).replace(",", " ") }} Kč{% else %}—{% endif %}
+      </div>
+    </div>
+    <div class="stat"><div class="stat-l">Počet kontrol</div><div class="stat-v">{{ history|length }}</div></div>
+    <div class="stat"><div class="stat-l">Cílová cena</div><div class="stat-v">{% if p.target %}{{ "{:,.0f}".format(p.target).replace(",", " ") }} Kč{% else %}—{% endif %}</div></div>
+  </div>
+
+  <div class="chart-card">
+    <h2>Vývoj ceny</h2>
+    <div class="chart-wrap"><canvas id="chart"></canvas></div>
+  </div>
+
+  <div class="table-card">
+    <h2>Záznamy</h2>
+    <table>
+      <thead><tr><th>Čas</th><th>Cena</th><th>S kuponem</th><th>Změna</th><th>AlzaDny</th><th>Kupon</th></tr></thead>
+      <tbody>
+        {% for i in range(history|length - 1, -1, -1) %}
+        {% set row = history[i] %}
+        {% set prev = history[i-1] if i > 0 else none %}
+        <tr>
+          <td>{{ row.checked_at }}</td>
+          <td><b>{% if row.price %}{{ "{:,.0f}".format(row.price).replace(",", " ") }} Kč{% else %}—{% endif %}</b></td>
+          <td>{% if row.coupon_price %}<b class="dn">{{ "{:,.0f}".format(row.coupon_price).replace(",", " ") }} Kč</b>{% else %}—{% endif %}</td>
+          <td>
+            {% set cur_eff = row.coupon_price if row.coupon_price else row.price %}
+            {% set prev_eff = (prev.coupon_price if prev.coupon_price else prev.price) if prev else none %}
+            {% if cur_eff and prev_eff %}
+              {% set d = cur_eff - prev_eff %}
+              {% if d < 0 %}<span class="dn">▼ {{ "{:,.0f}".format(d|abs).replace(",", " ") }} Kč</span>
+              {% elif d > 0 %}<span class="up">▲ {{ "{:,.0f}".format(d).replace(",", " ") }} Kč</span>
+              {% else %}<span class="neu">—</span>{% endif %}
+            {% else %}<span class="neu">—</span>{% endif %}
+          </td>
+          <td>{% if row.alza_days %}<span class="badge b-fire">🔥 Ano</span>{% else %}—{% endif %}</td>
+          <td>{% if row.coupon %}<span class="badge b-coupon">{{ row.coupon }}</span>{% else %}—{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const H = {{ history | tojson }};
+const pts = H.filter(h => h.price != null);
+const labels = pts.map(h => {
+  const d = new Date(h.checked_at);
+  return d.toLocaleDateString('cs-CZ',{day:'2-digit',month:'2-digit'}) + ' ' + d.toLocaleTimeString('cs-CZ',{hour:'2-digit',minute:'2-digit'});
+});
+const vals = pts.map(h => h.price);
+const target = {{ p.target or 'null' }};
+
+new Chart(document.getElementById('chart'), {
+  type: 'line',
+  data: {
+    labels,
+    datasets: [
+      {
+        label: 'Cena (Kč)',
+        data: vals,
+        borderColor: '#e52213',
+        borderWidth: 2,
+        backgroundColor: 'rgba(229,34,19,0.06)',
+        fill: true,
+        tension: 0.35,
+        pointRadius: vals.length < 30 ? 4 : 2,
+        pointBackgroundColor: '#e52213',
+        pointHoverRadius: 6,
+      },
+      ...(target ? [{
+        label: 'Cílová cena',
+        data: vals.map(() => target),
+        borderColor: '#166534',
+        borderWidth: 1.5,
+        borderDash: [5,4],
+        pointRadius: 0,
+        fill: false,
+      }] : []),
+    ],
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: {intersect:false,mode:'index'},
+    plugins: {
+      legend: {display: !!target, position:'top', labels:{font:{size:12},boxWidth:18}},
+      tooltip: {callbacks:{label: c => `${c.dataset.label}: ${c.parsed.y.toLocaleString('cs-CZ')} Kč`}},
+    },
+    scales: {
+      x: {grid:{display:false}, ticks:{font:{size:11},maxTicksLimit:8}},
+      y: {
+        grid:{color:'rgba(0,0,0,0.04)'},
+        ticks:{font:{size:11}, callback: v => v.toLocaleString('cs-CZ') + ' Kč'},
+      },
+    },
+  },
+});
+</script>
+</body>
+</html>
